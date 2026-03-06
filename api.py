@@ -139,3 +139,10 @@ async def match_face(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     uvicorn.run("api:app", host="0.0.0.0", port=8001, reload=False)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("api:app", host="0.0.0.0", port=port)

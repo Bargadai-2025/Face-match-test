@@ -5,7 +5,8 @@ import masterDemoHeader from "./master-demo-header.svg?url";
 import headerMasterDemo from "./header-master-demo.svg?url";
 import bargadBranding from "./bargad-branding (1).svg?url";
 
-const API_URL = "http://localhost:8001";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 
 export default function FaceMatch() {
   const [preview, setPreview] = useState(null);

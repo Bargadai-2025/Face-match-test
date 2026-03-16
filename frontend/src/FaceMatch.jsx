@@ -11,9 +11,8 @@ import L from "leaflet";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-const CHALLENGES = ["blink", "turn_left", "nod", "smile", "mouth_open"];
+const CHALLENGES = ["turn_left", "nod", "smile", "mouth_open"];
 const CHALLENGE_TEXT = {
-  blink:      "👁️ Please BLINK your eyes",
   turn_left:  "↩️ Turn your head LEFT",
   nod:        "↕️ NOD your head down",
   smile:      "😊 Please SMILE",
@@ -33,8 +32,10 @@ export default function FaceMatch() {
   const [showCamera, setShowCamera] = useState(false);
   const [stream, setStream] = useState(null);
   const baselineRef = useRef(null);      // stores baseline measurements
-  const blinkStateRef = useRef("open");  // open → closed → open = blink done
-  const earHistoryRef = useRef([]);      // last 5 EAR values for smoothing
+  const earHistoryRef = useRef([]);      // used for baseline calibration
+  const noseYHistoryRef = useRef([]);    // nose Y over calibration for stable nod baseline
+  const noseCenterXHistoryRef = useRef([]); // nose X offset over calibration for stable turn_left baseline
+  const faceLostCountRef = useRef(0); 
 
 
   // Liveness + Geo states
@@ -125,7 +126,7 @@ const reverseGeocode = useCallback(async (lat, long) => {
 }, []);
 
 
-  // Eye Aspect Ratio for blink
+  // Eye Aspect Ratio (used in baseline calibration)
   const eyeAspectRatio = (eyePts) => {
     const dist = (a, b) => Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
     const v1 = dist(eyePts[1], eyePts[5]);
@@ -191,17 +192,7 @@ const reverseGeocode = useCallback(async (lat, long) => {
     const challengeColor = "rgba(255, 215, 0, 0.9)";
     const challenge = CHALLENGES[challengeIndexRef.current];
 
-    if (challenge === "blink") {
-      [[36, 42], [42, 48]].forEach(([start, end]) => {
-        const eyePts = pts.slice(start, end);
-        ctx.beginPath();
-        eyePts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-        ctx.closePath();
-        ctx.strokeStyle = challengeColor;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      });
-    } else if (challenge === "smile" || challenge === "mouth_open") {
+    if (challenge === "smile" || challenge === "mouth_open") {
       const mouthPts = pts.slice(48, 68);
       ctx.beginPath();
       mouthPts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
@@ -258,90 +249,95 @@ const reverseGeocode = useCallback(async (lat, long) => {
     drawFaceMesh(detection || null, video);
 
     if (detection) {
+      faceLostCountRef.current = 0;
       const pts  = detection.landmarks.positions;
       const expr = detection.expressions;
 
       // ── Step 1: Calibrate baseline on first detection ──
-      if (!baselineRef.current) {
-        const leftEAR  = eyeAspectRatio(pts.slice(36, 42));
-        const rightEAR = eyeAspectRatio(pts.slice(42, 48));
-        const faceWidth = Math.abs(pts[16].x - pts[0].x);
-        baselineRef.current = {
-          ear:         (leftEAR + rightEAR) / 2,   // normal open-eye EAR
-          noseCenterX: pts[30].x - (pts[0].x + pts[16].x) / 2, // nose offset from center
-          noseTipY:    pts[30].y,                  // nose Y at neutral
-          faceWidth:   faceWidth,
-        };
-        console.log("✅ Baseline calibrated:", baselineRef.current);
-        isDetectingRef.current = false;
-        return;
-      }
+      // Calibrate baseline over 10 frames, take average of best readings
+if (!baselineRef.current) {
+  const leftEAR  = eyeAspectRatio(pts.slice(36, 42));
+  const rightEAR = eyeAspectRatio(pts.slice(42, 48));
+  const ear = (leftEAR + rightEAR) / 2;
+
+  const faceCenterX = (pts[0].x + pts[16].x) / 2;
+  const noseOffsetX = pts[30].x - faceCenterX;
+
+  earHistoryRef.current.push(ear);
+  noseYHistoryRef.current.push(pts[30].y);
+  noseCenterXHistoryRef.current.push(noseOffsetX);
+
+  // Collect 10 frames then take MAX EAR and medians for stable baseline
+  if (earHistoryRef.current.length >= 10) {
+  const maxEAR = Math.max(...earHistoryRef.current);
+  const noseYSorted = [...noseYHistoryRef.current].sort((a, b) => a - b);
+  const medianNoseY = noseYSorted[Math.floor(noseYSorted.length / 2)];
+  const noseXSorted = [...noseCenterXHistoryRef.current].sort((a, b) => a - b);
+  const medianNoseCenterX = noseXSorted[Math.floor(noseXSorted.length / 2)];
+
+  baselineRef.current = {
+    ear:         maxEAR,
+    noseCenterX: medianNoseCenterX,
+    noseTipY:    medianNoseY,
+    faceWidth:   Math.abs(pts[16].x - pts[0].x),
+  };
+  earHistoryRef.current = [];
+  noseYHistoryRef.current = [];
+  noseCenterXHistoryRef.current = [];
+  console.log("✅ Baseline calibrated:", baselineRef.current);
+}
+else {
+    console.log(`📊 Calibrating... ${earHistoryRef.current.length}/10 EAR: ${ear.toFixed(3)}`);
+  }
+
+  isDetectingRef.current = false;
+  return;
+}
+
 
       const base    = baselineRef.current;
       const challenge = CHALLENGES[challengeIndexRef.current];
 
-      // ── BLINK: state machine open→closed→open ──
-      if (challenge === "blink") {
-        const leftEAR  = eyeAspectRatio(pts.slice(36, 42));
-        const rightEAR = eyeAspectRatio(pts.slice(42, 48));
-        const ear = (leftEAR + rightEAR) / 2;
+      // ── HEAD TURN LEFT: nose moves left of center => delta positive ──
+      if (challenge === "turn_left") {
+  const faceCenter = (pts[0].x + pts[16].x) / 2;
+  const noseOffset = pts[30].x - faceCenter;
+  const delta = base.noseCenterX - noseOffset; // positive when head turned left (nose left of baseline)
+  const threshold = base.faceWidth * 0.08;    // 8% of face width — relaxed for demo
 
-        // Smooth EAR over last 3 readings
-        earHistoryRef.current.push(ear);
-        if (earHistoryRef.current.length > 3) earHistoryRef.current.shift();
-        const smoothEAR = earHistoryRef.current.reduce((a, b) => a + b, 0) / earHistoryRef.current.length;
+  if (delta > threshold) markChallengeDone("turn_left");
+} else if (challenge === "nod") {
+  const currentNoseTipY = pts[30].y;
+  const nodDelta = currentNoseTipY - base.noseTipY; // positive = head tilted down
+  const threshold = Math.max(6, base.faceWidth * 0.06); // 6% of face width, min 6px — relaxed for demo
 
-        // Blink threshold = 75% of baseline (works for all face sizes/distances)
-        const blinkThreshold = base.ear * 0.75;
-
-        if (blinkStateRef.current === "open" && smoothEAR < blinkThreshold) {
-          blinkStateRef.current = "closed";
-          console.log(`👁 Eyes closed — EAR: ${smoothEAR.toFixed(3)} < ${blinkThreshold.toFixed(3)}`);
-        } else if (blinkStateRef.current === "closed" && smoothEAR >= blinkThreshold) {
-          blinkStateRef.current = "open";
-          console.log("👁 Blink complete!");
-          markChallengeDone("blink");
-        }
-
-      // ── HEAD TURN LEFT: relative nose shift from baseline ──
-      } else if (challenge === "turn_left") {
-        const faceCenter  = (pts[0].x + pts[16].x) / 2;
-        const noseOffset  = pts[30].x - faceCenter;
-        // Must move left by at least 20% of face width from baseline
-        const threshold   = base.faceWidth * 0.20;
-        const delta       = base.noseCenterX - noseOffset;
-
-        console.log(`↩ Head turn delta: ${delta.toFixed(1)} / needed: ${threshold.toFixed(1)}`);
-        if (delta > threshold) markChallengeDone("turn_left");
-
-      // ── NOD: relative nose Y drop from baseline ──
-      } else if (challenge === "nod") {
-        const nodDelta = pts[30].y - base.noseTipY;
-        // Must nod down by at least 15% of face width
-        const threshold = base.faceWidth * 0.15;
-
-        console.log(`↕ Nod delta: ${nodDelta.toFixed(1)} / needed: ${threshold.toFixed(1)}`);
-        if (nodDelta > threshold) markChallengeDone("nod");
+  if (nodDelta > threshold) markChallengeDone("nod");
 
       // ── SMILE: expression confidence ──
       } else if (challenge === "smile") {
         console.log(`😊 Happy: ${expr.happy.toFixed(2)}`);
-        if (expr.happy > 0.60) markChallengeDone("smile");
+        if (expr.happy > 0.45) markChallengeDone("smile"); // relaxed from 0.60
 
       // ── MOUTH OPEN: relative lip distance ──
       } else if (challenge === "mouth_open") {
         const mouthOpen = Math.abs(pts[62].y - pts[66].y);
-        // Must open mouth by at least 8% of face width
-        const threshold = base.faceWidth * 0.08;
+        const threshold = base.faceWidth * 0.06; // 6% — relaxed for demo
         console.log(`😮 Mouth open: ${mouthOpen.toFixed(1)} / needed: ${threshold.toFixed(1)}`);
         if (mouthOpen > threshold) markChallengeDone("mouth_open");
       }
 
     } else {
+    faceLostCountRef.current += 1;
+
+  // Only reset baseline if face missing for 10+ consecutive frames (1 second)
+  if (faceLostCountRef.current > 10) {
+    baselineRef.current = null;
+    earHistoryRef.current = [];
+    noseYHistoryRef.current = [];
+    noseCenterXHistoryRef.current = [];
+    faceLostCountRef.current = 0;
+  }
       // No face — reset baseline so it recalibrates when face returns
-      baselineRef.current = null;
-      earHistoryRef.current = [];
-      blinkStateRef.current = "open";
       const canvas = overlayCanvasRef.current;
       if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
     }
@@ -379,14 +375,15 @@ const reverseGeocode = useCallback(async (lat, long) => {
       setCompletedChallenges([]);
       completedRef.current = [];
       setLivenessLive(false);
-      setChallengeMsg(CHALLENGE_TEXT["blink"]);
+      setChallengeMsg(CHALLENGE_TEXT[CHALLENGES[0]]);
+      faceLostCountRef.current = 0;  //
 
       setTimeout(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = s;
           videoRef.current.onloadedmetadata = () => {
             if (modelsLoaded) {
-              intervalRef.current = setInterval(runLivenessLoop, 200);
+              intervalRef.current = setInterval(runLivenessLoop, 100);
             }
           };
         }

@@ -18,7 +18,7 @@ L.Icon.Default.mergeOptions({
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 /** Match API can be slow (Render cold start, large DB scan). */
-const MATCH_REQUEST_TIMEOUT_MS = 120_000; // 2 minutes
+const MATCH_REQUEST_TIMEOUT_MS = 45_000; // 2 minutes
 
 const CHALLENGES = ["turn_left", "nod", "smile", "mouth_open"];
 const CHALLENGE_TEXT = {

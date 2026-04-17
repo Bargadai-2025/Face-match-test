@@ -17,6 +17,10 @@ frontend/.env
 frontend/dist/
 frontend/build/
 
+# Currency YOLO weights (large; add via deploy or release asset)
+models/currency/*.pt
+models/currency/**/*.pt
+
 # OS
 .DS_Store
 Thumbs.db

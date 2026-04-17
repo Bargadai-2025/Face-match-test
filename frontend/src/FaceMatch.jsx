@@ -2,8 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import * as faceapi from "face-api.js";
 import "./FaceMatch.css";
 import mainBg from "./Main background.svg?url";
-import masterDemoHeader from "./master-demo-header.svg?url";
-import headerMasterDemo from "./header-master-demo.svg?url";
+import bargadLogo from "./bargad-logo.png";
 import bargadBranding from "./bargad-branding (1).svg?url";
 import { MapContainer, TileLayer, Marker } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
@@ -18,7 +17,7 @@ L.Icon.Default.mergeOptions({
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 /** Match API can be slow (Render cold start, large DB scan). */
-const MATCH_REQUEST_TIMEOUT_MS = 45_000; // 2 minutes
+const MATCH_REQUEST_TIMEOUT_MS = 30_000;
 
 const CHALLENGES = ["turn_left", "nod", "smile", "mouth_open"];
 const CHALLENGE_TEXT = {
@@ -490,8 +489,7 @@ export default function FaceMatch() {
       }}
     >
       <header className="fm-header-banner">
-        <img src={masterDemoHeader} alt="" className="fm-header-bg" />
-        <img src={headerMasterDemo} alt="Header" className="fm-header-logo" />
+        <img src={bargadLogo} alt="Bargad" className="fm-header-logo" />
       </header>
 
       <div className={`fm-container ${showCamera ? "fm-container-wide" : ""}`}>

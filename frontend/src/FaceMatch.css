@@ -76,8 +76,8 @@ body {
 .fm-profile-btn {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
+  gap: 6px;
+  padding: 6px 10px 6px 8px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   background: rgba(0, 0, 0, 0.25);
@@ -93,9 +93,31 @@ body {
   border-color: rgba(36, 170, 77, 0.5);
 }
 
+.fm-profile-avatar-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #f1f5f9;
+}
+.fm-profile-btn:hover .fm-profile-avatar-wrap {
+  background: rgba(36, 170, 77, 0.35);
+  color: #fff;
+}
+
+.fm-profile-avatar-svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
 .fm-profile-chevron {
-  font-size: 10px;
+  font-size: 9px;
   opacity: 0.85;
+  padding-right: 2px;
 }
 
 .fm-profile-dropdown {

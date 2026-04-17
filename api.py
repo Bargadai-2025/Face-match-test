@@ -18,6 +18,8 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://facematch.bargad.ai",
+        "https://www.facematch.bargad.ai",
         "https://face-match-test-xgua.vercel.app",
         "http://localhost:5173",
         "http://localhost:3000",

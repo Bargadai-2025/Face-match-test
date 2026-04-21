@@ -41,7 +41,7 @@ collection = db["faces"]
 auth_logs = db["auth_logs"]   # NEW: stores geo + liveness logs
 liveness_sessions = db["liveness_sessions"]
 
-# Must match frontend gesture IDs (10 distinct challenges in the pool).
+# Must match frontend gesture IDs (pool used for random 4-gesture sessions).
 ALL_GESTURE_IDS = [
     "turn_left",
     "turn_right",
@@ -50,9 +50,8 @@ ALL_GESTURE_IDS = [
     "smile",
     "surprised",
     "mouth_open",
-    "blink",
     "tilt_head",
-    "angry",
+    "wide_eyes",
 ]
 
 SESSION_TTL_MINUTES = 15

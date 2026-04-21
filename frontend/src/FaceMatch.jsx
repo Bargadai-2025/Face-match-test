@@ -20,6 +20,16 @@ const MATCH_REQUEST_TIMEOUT_MS = 30_000;
 
 const DEVICE_KEY = "facematch_device_id";
 const SUSTAINED_FRAMES = 4;
+/** Fewer calibration frames = faster start; median still stabilizes pose. */
+const CALIBRATION_FRAMES = 10;
+/** Faster liveness sampling (ms). */
+const LIVENESS_INTERVAL_MS = 100;
+/** Mesh redraw less often so landmark+expression work gets more CPU budget. */
+const MESH_INTERVAL_MS = 650;
+/** Larger TinyFaceDetector input = stabler landmarks for tilt / eyes (tradeoff: more GPU/CPU). */
+const LIVENESS_FACE_INPUT_SIZE = 416;
+const MESH_FACE_INPUT_SIZE = 288;
+const LIVENESS_SCORE_THRESHOLD = 0.28;
 
 /** Gesture ids are issued by the server; labels here must stay in sync with `ALL_GESTURE_IDS` in api.py. */
 const CHALLENGE_TEXT = {
@@ -30,9 +40,8 @@ const CHALLENGE_TEXT = {
   smile: "😊 Please SMILE",
   surprised: "😲 Look SURPRISED",
   mouth_open: "😮 OPEN your mouth wide",
-  blink: "😑 BLINK both eyes once",
-  tilt_head: "↔️ TILT head toward one shoulder (ear line)",
-  angry: "😠 Make an ANGRY / frowning face",
+  tilt_head: "↔️ TILT head toward one shoulder (one brow slightly higher)",
+  wide_eyes: "👀 OPEN your eyes wide (look alert)",
 };
 
 function getOrCreateDeviceId() {
@@ -67,6 +76,13 @@ function headTiltDeltaRad(current, baseline) {
   while (d > Math.PI) d -= 2 * Math.PI;
   while (d < -Math.PI) d += 2 * Math.PI;
   return Math.abs(d);
+}
+
+/** Brow vertical asymmetry / face width — rises on head roll toward shoulder (68-pt model). */
+function eyebrowRollAsymmetry(pts, faceW) {
+  const leftBrow = (pts[19].y + pts[21].y) / 2;
+  const rightBrow = (pts[24].y + pts[26].y) / 2;
+  return Math.abs(leftBrow - rightBrow) / Math.max(faceW, 1e-6);
 }
 
 async function captureBurstFromVideo(video, count, delayMs) {
@@ -145,6 +161,7 @@ export default function FaceMatch({ userEmail, onLogout }) {
   const noseCenterXHistoryRef = useRef([]);
   const faceWidthHistoryRef = useRef([]);
   const calEyeAngRef = useRef([]);
+  const calBrowAsymRef = useRef([]);
   const calLeftEarRef = useRef([]);
   const calRightEarRef = useRef([]);
   const faceLostCountRef = useRef(0);
@@ -153,7 +170,6 @@ export default function FaceMatch({ userEmail, onLogout }) {
   const livenessSessionIdRef = useRef(null);
   const livenessCompletedRef = useRef(false);
   const sustainCountRef = useRef(0);
-  const blinkSawLowRef = useRef(false);
   const postVerifyRunningRef = useRef(false);
 
   // Load face-api models once
@@ -265,7 +281,7 @@ export default function FaceMatch({ userEmail, onLogout }) {
     const challengeColor = "rgba(255, 215, 0, 0.9)";
     const list = sessionChallengesRef.current;
     const challenge = list[challengeIndexRef.current];
-    if (challenge === "smile" || challenge === "surprised" || challenge === "angry" || challenge === "mouth_open") {
+    if (challenge === "smile" || challenge === "surprised" || challenge === "mouth_open") {
       ctx.beginPath();
       pts.slice(48, 68).forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
       ctx.strokeStyle = challengeColor;
@@ -290,7 +306,7 @@ export default function FaceMatch({ userEmail, onLogout }) {
       ctx.strokeStyle = challengeColor;
       ctx.lineWidth = 3;
       ctx.stroke();
-    } else if (challenge === "blink") {
+    } else if (challenge === "wide_eyes") {
       [36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47].forEach((idx) => {
         ctx.beginPath();
         ctx.arc(pts[idx].x, pts[idx].y, 3.5, 0, 2 * Math.PI);
@@ -307,7 +323,13 @@ export default function FaceMatch({ userEmail, onLogout }) {
     isMeshDetectingRef.current = true;
     try {
       const detection = await faceapi
-        .detectSingleFace(videoRef.current, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 }))
+        .detectSingleFace(
+          videoRef.current,
+          new faceapi.TinyFaceDetectorOptions({
+            inputSize: MESH_FACE_INPUT_SIZE,
+            scoreThreshold: LIVENESS_SCORE_THRESHOLD,
+          })
+        )
         .withFaceLandmarks();
       drawFaceMesh(detection || null, videoRef.current);
     } catch (_) {}
@@ -323,7 +345,6 @@ export default function FaceMatch({ userEmail, onLogout }) {
     }, 1000);
 
     sustainCountRef.current = 0;
-    blinkSawLowRef.current = false;
 
     const newCompleted = [...completedRef.current, name];
     completedRef.current = newCompleted;
@@ -439,8 +460,8 @@ export default function FaceMatch({ userEmail, onLogout }) {
         .detectSingleFace(
           video,
           new faceapi.TinyFaceDetectorOptions({
-            inputSize: 320,
-            scoreThreshold: 0.3,
+            inputSize: LIVENESS_FACE_INPUT_SIZE,
+            scoreThreshold: LIVENESS_SCORE_THRESHOLD,
           })
         )
         .withFaceLandmarks()
@@ -457,25 +478,30 @@ export default function FaceMatch({ userEmail, onLogout }) {
           noseYHistoryRef.current.push(pts[30].y);
           noseCenterXHistoryRef.current.push(pts[30].x - faceCenterX);
           faceWidthHistoryRef.current.push(Math.abs(pts[16].x - pts[0].x));
+          const fw = Math.abs(pts[16].x - pts[0].x);
           calEyeAngRef.current.push(eyeTiltAngleRad(pts));
+          calBrowAsymRef.current.push(eyebrowRollAsymmetry(pts, fw));
           calLeftEarRef.current.push(landmarkEAR(pts, 36));
           calRightEarRef.current.push(landmarkEAR(pts, 42));
 
-          if (noseYHistoryRef.current.length >= 15) {
+          if (noseYHistoryRef.current.length >= CALIBRATION_FRAMES) {
             const sortedY = [...noseYHistoryRef.current].sort((a, b) => a - b);
             const sortedX = [...noseCenterXHistoryRef.current].sort((a, b) => a - b);
             const sortedFW = [...faceWidthHistoryRef.current].sort((a, b) => a - b);
             const eyeAngles = [...calEyeAngRef.current].sort((a, b) => a - b);
+            const browAsyms = [...calBrowAsymRef.current].sort((a, b) => a - b);
             const les = [...calLeftEarRef.current].sort((a, b) => a - b);
             const res = [...calRightEarRef.current].sort((a, b) => a - b);
             const mid = Math.floor(sortedY.length / 2);
             const eMid = Math.floor(eyeAngles.length / 2);
+            const bMid = Math.floor(browAsyms.length / 2);
 
             baselineRef.current = {
               noseTipY: sortedY[mid],
               noseCenterX: sortedX[mid],
               faceWidth: sortedFW[mid],
               eyeAngle: eyeAngles[eMid] ?? 0,
+              browAsym: browAsyms[bMid] ?? 0,
               leftEAR: les[eMid] ?? 0.25,
               rightEAR: res[eMid] ?? 0.25,
             };
@@ -483,11 +509,12 @@ export default function FaceMatch({ userEmail, onLogout }) {
             noseCenterXHistoryRef.current = [];
             faceWidthHistoryRef.current = [];
             calEyeAngRef.current = [];
+            calBrowAsymRef.current = [];
             calLeftEarRef.current = [];
             calRightEarRef.current = [];
             console.log("✅ Baseline ready:", baselineRef.current);
           } else {
-            console.log(`📊 Calibrating ${noseYHistoryRef.current.length}/15...`);
+            console.log(`📊 Calibrating ${noseYHistoryRef.current.length}/${CALIBRATION_FRAMES}...`);
           }
           isDetectingRef.current = false;
           return;
@@ -524,35 +551,39 @@ export default function FaceMatch({ userEmail, onLogout }) {
           const mouthOpen = Math.abs(pts[62].y - pts[66].y);
           const threshold = Math.max(5, base.faceWidth * 0.055);
           registerSustained(mouthOpen > threshold, "mouth_open");
-        } else if (challenge === "blink") {
+        } else if (challenge === "tilt_head") {
+          const ang = headTiltDeltaRad(eyeTiltAngleRad(pts), base.eyeAngle);
+          const curBrow = eyebrowRollAsymmetry(pts, base.faceWidth);
+          const browDelta = Math.abs(curBrow - (base.browAsym ?? 0));
+          const tiltOk =
+            ang > 0.056 ||
+            browDelta > 0.036 ||
+            (ang > 0.042 && browDelta > 0.02);
+          registerSustained(tiltOk, "tilt_head", 3);
+        } else if (challenge === "wide_eyes") {
           const le = landmarkEAR(pts, 36);
           const re = landmarkEAR(pts, 42);
-          const meanB = (base.leftEAR + base.rightEAR) / 2;
-          const lowTh = meanB * 0.55;
-          const hiTh = meanB * 0.88;
-          if (!blinkSawLowRef.current) {
-            if (le < lowTh && re < lowTh) blinkSawLowRef.current = true;
-          } else if (le > hiTh && re > hiTh) {
-            markChallengeDoneRef.current("blink");
-            blinkSawLowRef.current = false;
-          }
-        } else if (challenge === "tilt_head") {
-          const tilt = headTiltDeltaRad(eyeTiltAngleRad(pts), base.eyeAngle);
-          const need = 0.09;
-          registerSustained(tilt > need, "tilt_head");
-        } else if (challenge === "angry") {
-          registerSustained(expr.angry > 0.36, "angry");
+          const bl = Math.max(base.leftEAR, 0.05);
+          const br = Math.max(base.rightEAR, 0.05);
+          const landmarkWide =
+            le > bl * 1.07 &&
+            re > br * 1.07 &&
+            le > 0.13 &&
+            re > 0.13;
+          const withSurprise =
+            expr.surprised > 0.3 && le > bl * 1.04 && re > br * 1.04 && le > 0.12 && re > 0.12;
+          registerSustained(landmarkWide || withSurprise, "wide_eyes", 3);
         }
       } else {
         faceLostCountRef.current += 1;
         sustainCountRef.current = 0;
-        blinkSawLowRef.current = false;
         if (faceLostCountRef.current > 15) {
           baselineRef.current = null;
           noseYHistoryRef.current = [];
           noseCenterXHistoryRef.current = [];
           faceWidthHistoryRef.current = [];
           calEyeAngRef.current = [];
+          calBrowAsymRef.current = [];
           calLeftEarRef.current = [];
           calRightEarRef.current = [];
           faceLostCountRef.current = 0;
@@ -593,12 +624,12 @@ export default function FaceMatch({ userEmail, onLogout }) {
     noseCenterXHistoryRef.current = [];
     faceWidthHistoryRef.current = [];
     calEyeAngRef.current = [];
+    calBrowAsymRef.current = [];
     calLeftEarRef.current = [];
     calRightEarRef.current = [];
     faceLostCountRef.current = 0;
     challengeCooldownRef.current = false;
     sustainCountRef.current = 0;
-    blinkSawLowRef.current = false;
     postVerifyRunningRef.current = false;
   };
 
@@ -609,38 +640,97 @@ export default function FaceMatch({ userEmail, onLogout }) {
     }
     setError(null);
     setLivenessSessionLoading(true);
-    try {
-      const deviceId = getOrCreateDeviceId();
-      const res = await fetch(`${API_URL}/liveness/session`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ device_id: deviceId }),
-      });
-      let data = {};
+    const deviceId = getOrCreateDeviceId();
+
+    const sessionPromise = fetch(`${API_URL}/liveness/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId }),
+    }).then(async (r) => ({
+      ok: r.ok,
+      status: r.status,
+      data: await r.json().catch(() => ({})),
+    }));
+
+    const streamPromise = (async () => {
       try {
-        data = await res.json();
-      } catch {
-        data = {};
+        return await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "user",
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+          },
+        });
+      } catch (e1) {
+        console.warn("getUserMedia (ideal constraints) failed, retrying with basic video:", e1);
+        return navigator.mediaDevices.getUserMedia({ video: true });
       }
-      if (!res.ok) {
+    })();
+
+    try {
+      const [sessSettled, streamSettled] = await Promise.allSettled([sessionPromise, streamPromise]);
+
+      let mediaStream = null;
+      if (streamSettled.status === "fulfilled") mediaStream = streamSettled.value;
+      else console.warn("getUserMedia:", streamSettled.reason);
+
+      let sessionPart = null;
+      if (sessSettled.status === "fulfilled") sessionPart = sessSettled.value;
+      else console.warn("liveness/session:", sessSettled.reason);
+
+      const stopStream = () => {
+        if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+      };
+
+      if (!sessionPart || !sessionPart.ok) {
+        stopStream();
+        const data =
+          sessionPart && typeof sessionPart.data === "object" && sessionPart.data !== null
+            ? sessionPart.data
+            : {};
         const msg =
-          res.status === 409
+          sessionPart?.status === 409
             ? typeof data.detail === "string"
               ? data.detail
               : "All gesture sequences may be exhausted for this device."
             : typeof data.detail === "string"
               ? data.detail
               : "Could not start liveness session.";
-        setError(msg);
+        setError(sessionPart ? msg : "Could not reach server for liveness session.");
         setLivenessSessionLoading(false);
         return;
       }
-      const { session_id, gestures } = data;
+
+      const payload =
+        sessionPart.data !== null && typeof sessionPart.data === "object"
+          ? sessionPart.data
+          : {};
+      const session_id = payload.session_id;
+      const gestures = payload.gestures;
       if (!session_id || !Array.isArray(gestures) || gestures.length === 0) {
+        stopStream();
         setError("Invalid server response for liveness session.");
         setLivenessSessionLoading(false);
         return;
       }
+
+      if (!mediaStream) {
+        const r = streamSettled.status === "rejected" ? streamSettled.reason : null;
+        const reason =
+          r && typeof r === "object" && "message" in r
+            ? String(r.message)
+            : r
+              ? String(r)
+              : "";
+        setError(
+          reason
+            ? `Camera: ${reason}`
+            : "Camera access denied or unavailable. Please allow the camera and try again."
+        );
+        setLivenessSessionLoading(false);
+        return;
+      }
+
       livenessSessionIdRef.current = session_id;
       livenessCompletedRef.current = false;
       setCanMatch(false);
@@ -648,23 +738,27 @@ export default function FaceMatch({ userEmail, onLogout }) {
       setSessionChallenges(gestures);
       resetLiveness();
 
-      const s = await navigator.mediaDevices.getUserMedia({ video: true });
-      setStream(s);
+      setStream(mediaStream);
       setShowCamera(true);
       setLivenessSessionLoading(false);
 
       setTimeout(() => {
         if (videoRef.current) {
-          videoRef.current.srcObject = s;
+          videoRef.current.srcObject = mediaStream;
           videoRef.current.onloadedmetadata = () => {
-            intervalRef.current = setInterval(runLivenessLoop, 150);
-            meshIntervalRef.current = setInterval(runMeshLoop, 500);
+            intervalRef.current = setInterval(runLivenessLoop, LIVENESS_INTERVAL_MS);
+            meshIntervalRef.current = setInterval(runMeshLoop, MESH_INTERVAL_MS);
           };
         }
-      }, 100);
-    } catch {
+      }, 50);
+    } catch (err) {
+      console.error("startCamera:", err);
       setLivenessSessionLoading(false);
-      setError("Camera access denied. Please allow camera permission.");
+      setError(
+        err?.message
+          ? `Could not start camera session: ${err.message}`
+          : "Could not start camera session. Check the browser console and ensure VITE_API_URL points to your API (e.g. http://localhost:8000)."
+      );
       sessionChallengesRef.current = [];
       setSessionChallenges([]);
       livenessSessionIdRef.current = null;
